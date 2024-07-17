@@ -26,6 +26,58 @@ fi
 
 echo "mysql install start... "
 
+selinux(){
+   getenforce | grep Enforcing
+   if [ $? -eq 0 ]; then
+	    sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+      setenforce 0
+      echo 'set enforce diabled successfully'
+   else
+      echo 'selinux status is diabled'
+   fi
+}
+
+npm_install(){
+    yum install -y libaio  libnuma* net-tools perl compat-openssl10 libncurses* libtinfo*
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-common-$MYSQL_VERSION.rpm
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-client-plugins-$MYSQL_VERSION.rpm
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-libs-$MYSQL_VERSION.rpm 
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-icu-data-files-$MYSQL_VERSION.rpm
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-client-$MYSQL_VERSION.rpm 
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-server-$MYSQL_VERSION.rpm
+    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-backup-$MYSQL_VERSION.rpm
+    if [ $? -ne 0]; then
+      exit 1
+    fi
+}
+
+modi_mysql_config(){
+    sed "s|3306|$MYSQL_PORT|;s|@serverid|$MYSQL_SERVER_ID|;s|@datadir|$MYSQL_DATA_PATH|;s|@buffersize|$MYSQL_INNODB_BUFFER_POOL_SIZE|" _my.cnf > /etc/my.cnf
+    if [ $? -ne 0 ];then
+    echo 'Failed to replace /etc/my.cnf!!!'
+    exit 1
+    else
+    echo '===================================='
+    echo '/etc/my.cnf successfully modified!'
+    echo '===================================='
+    fi
+}
+change_root_password(){
+    dbPassword=`grep 'temporary password' /var/log/mysqld.log | awk -F ' ' 'END{print $NF}'`
+    #dbPassword=`grep 'temporary password' /var/log/mysqld.log | awk -F ' ' '{print $NF}'`
+    if [ -z "$dbPassword" ];then
+      echo "fetch temporary password error,please fix it manually"
+      exit 0
+    fi
+    echo "Mysql temporary password is ${MYSQL_ROOT_PASSWORD}"
+    mysqladmin -uroot -p'$dbPassword' password  $MYSQL_ROOT_PASSWORD
+    host='127.0.0.1'
+    dbUser='root'
+    sql_file='./init.sql'
+    sed -i "s/@MYSQL_ROOT_PASSWORD/'${MYSQL_ROOT_PASSWORD}'/g" $sql_file
+    mysql -h $host -u $dbUser -p'$MYSQL_ROOT_PASSWORD' -e "source $sql_file";
+    echo "Remote connection is set successfully!"
+}
 INIT_MYSQL(){
 
     #read -t 30 -e -p "输入你的数据库  :  " dbname
@@ -46,7 +98,7 @@ INIT_MYSQL(){
 	# 卸载系统⾃带的MARIADB
 	rpm -qa | grep mariadb | xargs yum remove -y > /dev/null
 	# disable SELINUX
-	sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+  selinux
 	
     echo "Mysql Port:" $MYSQL_PORT
     echo "MySQL serverId:" $MYSQL_SERVER_ID
@@ -69,66 +121,60 @@ INIT_MYSQL(){
 		mkdir ${MYSQL_TEMP_DIR}
     fi
     chown -R mysql.mysql ${MYSQL_TEMP_DIR}
-    chmod 750 ${MYSQL_TEMP_DIR}
+    chmod 770 ${MYSQL_TEMP_DIR}
    
 
     if [ ! -d "${MYSQL_DATA_PATH}" ];then
 		mkdir -p ${MYSQL_DATA_PATH}
     fi
     chown -R mysql.mysql ${MYSQL_DATA_PATH}
-    chmod 750 ${MYSQL_DATA_PATH}
+    chmod 770 ${MYSQL_DATA_PATH}
     
 
     if [ ! -d "MYSQL_BINLOG_DIR" ];then
 		mkdir -p ${MYSQL_BINLOG_DIR}
     fi
     chown -R mysql.mysql ${MYSQL_BINLOG_DIR}
-    chmod 750 ${MYSQL_BINLOG_DIR}
+    chmod 770 ${MYSQL_BINLOG_DIR}
     	
 
     ###install mysql server
+    #npm_install
 	
-    yum install -y libaio  libnuma* net-tools perl compat-openssl10 libncurses* libtinfo*
-    #yum install -y xz numactl* jemalloc* libaio* net-tools nload iftop sysstat wget vim ntpdate lrzsz 
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-common-$MYSQL_VERSION.rpm
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-client-plugins-$MYSQL_VERSION.rpm
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-libs-$MYSQL_VERSION.rpm 
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-icu-data-files-$MYSQL_VERSION.rpm
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-client-$MYSQL_VERSION.rpm 
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-server-$MYSQL_VERSION.rpm
-    rpm -ivh ./package/mysql-${MYSQL_LICENCE_VERSION}-backup-$MYSQL_VERSION.rpm
-	
-    sed "s|3306|$MYSQL_PORT|;s|@serverid|$MYSQL_SERVER_ID|;s|@datadir|$MYSQL_DATA_PATH|;s|@buffersize|$MYSQL_INNODB_BUFFER_POOL_SIZE|" _my.cnf > /etc/my.cnf
-	if [ $? -ne 0 ];then
-	echo 'Failed to replace /etc/init.d/mysqld!!!'
-	exit
-	else
-	echo '===================================='
-	echo '/etc/init.d/mysqld successfully modified!'
-	echo '===================================='
-	fi
+    modi_mysql_config
 	
     echo "mysql init"
     #mysqld  --initialize --user=mysql --datadir=${MYSQL_DATA_PATH} > ./tmppwd 2>&1    
-    mysqld  --initialize --user=mysql --datadir=${MYSQL_DATA_PATH}
+    mysqld  --initialize --user=mysql
     #mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid --user=mysql
    
 
 	# 设置MYSQL系统服务并开启⾃启
 	systemctl enable mysqld
-	systemctl start mysqld &
-	
+	systemctl start mysqld
+	if [ $? -ne 0 ]; then
+    echo "systemctl start mysqld, please check the log file /var/ib/mysqld.log"
+    exit 1
+  fi
+
+  try_times=0
 	while true
 	do
-		 netstat -ntlp | grep $dbport
+     if [ try_times > 10 ]; then
+      echo "systemctl start mysqld failure! please view the log file /var/lib/mysqld.log"
+      exit 1
+     fi
+		 netstat -ntlp | grep $MYSQL_PORT
 		 if [ $? -eq 1 ]
 		 then
 			echo "MySQL Starting,please wait......"
+      try_times+=1
 			sleep 2
 			continue
 		 else
 			if [ ! -e "/var/lib/mysql/mysql.sock" ];then
 				echo "MySQL Starting,please wait......"
+        try_times+=1
 				sleep 2
 				continue
 			fi
@@ -145,21 +191,9 @@ INIT_MYSQL(){
 		exit 1
 	fi
    ###更改root账号随机密码
-   dbPassword=`grep 'temporary password' /var/log/mysqld.log | awk -F ' ' 'END{print $NF}'`
-   #dbPassword=`grep 'temporary password' /var/log/mysqld.log | awk -F ' ' '{print $NF}'`
-   if [ -z "$dbPassword" ];then
-	 echo "fetch temporary password error,please fix it manually"
-	 exit 0
-   fi
-   echo "Mysql temporary password is ${MYSQL_ROOT_PASSWORD}"
-   mysqladmin -uroot -p'$dbPassword' password  $MYSQL_ROOT_PASSWORD
-   host='127.0.0.1'
-   dbUser='root'
-   sql_file='./init.sql'
-   sed -i "s/@MYSQL_ROOT_PASSWORD/'${MYSQL_ROOT_PASSWORD}'/g" $sql_file
-   mysql -h $host -u $dbUser -p'$MYSQL_ROOT_PASSWORD' -e "source $sql_file";
-   echo "Remote connection is set successfully!"
-   echo "MySQL install completed!"
+  change_root_password
+
+  echo "MySQL install completed!"
    
    #rm -f ./tmppwd
 }
@@ -169,7 +203,7 @@ fi
 if [ `cd $MYSQL_DATA_PATH && ls  |wc -l` -eq 0 ];then
    INIT_MYSQL
 else
-   #mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid --user=mysql
+   #mysqld --daemonize --pid-file=/var/run/mysqld/mysqld.pid --user=mysqlL;:
    systemctl start mysqld
 fi
 #cat /var/log/mysqld.log
